@@ -1,10 +1,9 @@
 import os
-import requests
-from bs4 import BeautifulSoup
-from datetime import datetime, timedelta
+import ssl
+import json
 import logging
-
-from config import FORUM_URL, FORUM_HEADERS, THRESHOLD_HOURS
+from datetime import datetime, timedelta
+from html.parser import HTMLParser
 
 # Токен и chat ID — из переменных окружения (GitHub Secrets)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -21,137 +20,132 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+FORUM_URL = "https://forum.radmir.games/forums/zhaloby-na-igrokov-sost-v-kriminal-nykh-strukturakh.972/"
+THRESHOLD_HOURS = 20
+
+# SSL context — GitHub Actions
+ctx = ssl.create_default_context()
+
+
+# ==================== HTTP ====================
+
+def http_get(url: str) -> str | None:
+    try:
+        import urllib.request
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+            return resp.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        logger.error(f"HTTP GET ошибка: {e}")
+        return None
+
 
 # ==================== Telegram ====================
 
 def send_telegram_message(message: str) -> bool:
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
-        resp = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}, timeout=10)
-        if resp.status_code == 200:
+        import urllib.request
+        data = json.dumps({"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}).encode()
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
             logger.info("Сообщение отправлено в Telegram.")
             return True
-        logger.error(f"Ошибка Telegram API: {resp.status_code} — {resp.text}")
-        return False
     except Exception as e:
-        logger.error(f"Не удалось отправить: {e}")
+        logger.error(f"Ошибка Telegram: {e}")
         return False
 
 
-# ==================== Парсинг форума ====================
+# ==================== Парсинг ====================
 
-THREAD_SELECTORS = [
-    "li.discuss-item",
-    "li.structItem--discussion",
-    "article.thread",
-    "div.structItem",
-    "li.data.listCell.lastPost",
-]
+class ThreadParser(HTMLParser):
+    """Минимальный парсер для XenForo — собирает темы и даты."""
 
-DATE_SELECTORS = [
-    "time[data-time]",
-    "time.js-lastPost",
-    "span.symbolLatestNewest",
-]
+    def __init__(self):
+        super().__init__()
+        self.threads = []
+        self.in_title = False
+        self.title_text = ""
+        self.href = ""
+        self.in_time = False
+        self.time_text = ""
+        self.data_time = ""
+        self.collected = False  # одна тема собрана
+
+    def handle_starttag(self, tag, attrs):
+        attrs_d = dict(attrs)
+        cls = attrs_d.get("class", "")
+        href = attrs_d.get("href", "")
+
+        # Заголовок темы (ссылка на обсуждение)
+        if tag == "a" and ("structItem-link" in cls or "link--" in cls or "link" in cls):
+            if "href" in attrs_d and "/threads/" in href:
+                self.in_title = True
+                self.title_text = ""
+                self.href = href
+
+        # Время
+        if tag == "time" and "data-time" in attrs_d:
+            self.in_time = True
+            self.data_time = attrs_d.get("data-time", "")
+            self.time_text = ""
+
+    def handle_data(self, data):
+        if self.in_title:
+            self.title_text += data
+
+    def handle_endtag(self, tag):
+        if self.in_title and tag == "a":
+            self.in_title = False
+            title = self.title_text.strip()
+            if title and self.href:
+                if not self.href.startswith("http"):
+                    self.href = "https://forum.radmir.games" + self.href
+
+                # Дата
+                date_str = None
+                if self.data_time:
+                    try:
+                        date_str = datetime.fromtimestamp(int(self.data_time))
+                    except (ValueError, OSError):
+                        pass
+                else:
+                    self.data_time = ""
+
+                self.threads.append({
+                    "title": title,
+                    "url": self.href,
+                    "date": date_str,
+                })
+                self.collected = True
+                self.href = ""
+                self.title_text = ""
+
+        if self.in_time and tag == "time":
+            self.in_time = False
+
+    def reset(self):
+        super().reset()
+        self.in_title = False
+        self.title_text = ""
+        self.href = ""
+        self.in_time = False
+        self.time_text = ""
+        self.data_time = ""
+        self.collected = False
 
 
-def fetch_page(page_num: int = 0):
-    params = {"page": page_num} if page_num > 0 else {}
+def fetch_page(html: str) -> list[dict]:
+    parser = ThreadParser()
     try:
-        resp = requests.get(FORUM_URL, headers=FORUM_HEADERS, params=params, timeout=15)
-        resp.raise_for_status()
-        return resp.text
+        parser.feed(html)
+        return parser.threads
     except Exception as e:
-        logger.error(f"Ошибка загрузки страницы {page_num}: {e}")
-        return None
+        logger.error(f"Парсинг ошибки: {e}")
+        return []
 
 
-def parse_threads(html: str) -> list[dict]:
-    soup = BeautifulSoup(html, "html.parser")
-    threads = []
-
-    # Находим селектор, который сработал
-    for selector in THREAD_SELECTORS:
-        items = soup.select(selector)
-        if items:
-            logger.info(f"Селектор: {selector} — найдено {len(items)} тем")
-            break
-    else:
-        logger.warning("Элементы тем не найдены.")
-        return threads
-
-    for item in items:
-        try:
-            title_el = item.select_one("a.link, a.structItem-link, a.title, a.p-header-user")
-            if not title_el:
-                continue
-
-            title = title_el.get_text(strip=True)
-            href = title_el.get("href", "")
-            if not href.startswith("http"):
-                href = "https://forum.radmir.games" + href
-
-            # Дата из data-time (Unix timestamp)
-            date_str = None
-            for ds in DATE_SELECTORS:
-                time_el = item.select_one(ds)
-                if time_el:
-                    ts = time_el.get("data-time")
-                    if ts:
-                        date_str = datetime.fromtimestamp(int(ts))
-                    break
-
-            # Если не нашли timestamp — ищем любые <time>
-            if date_str is None:
-                for time_el in item.select("time"):
-                    ts = time_el.get("data-time")
-                    if ts:
-                        date_str = datetime.fromtimestamp(int(ts))
-                        break
-
-            # Fallback: берём дату из <a> темы (иногда XenForo кладёт data-last-date)
-            if date_str is None:
-                thread_link = item.select_one("a[href*='/threads/']")
-                if thread_link:
-                    last_date = thread_link.get("data-last-date")
-                    if last_date:
-                        date_str = datetime.fromtimestamp(int(last_date))
-
-            threads.append({
-                "title": title,
-                "url": href,
-                "date": date_str,
-            })
-        except Exception as e:
-            logger.warning(f"Ошибка парсинга темы: {e}")
-            continue
-
-    return threads
-
-
-def get_page_count() -> int:
-    html = fetch_page(1)
-    if html is None:
-        return 0
-    soup = BeautifulSoup(html, "html.parser")
-    nav = soup.select_one("div.pagenav")
-    if nav:
-        links = nav.select("a.pagenav-page")
-        if links:
-            try:
-                return int(links[-1].get_text(strip=True))
-            except (ValueError, IndexError):
-                pass
-        last = nav.select_one("a.pagenav-page[data-page-range='last']")
-        if last:
-            try:
-                return int(last.get("data-page-value", "1"))
-            except (ValueError, AttributeError):
-                pass
-    return 1
-
-
-# ==================== Основная логика ====================
+# ==================== Главная ====================
 
 def main():
     logger.info("=" * 50)
@@ -159,31 +153,26 @@ def main():
     logger.info(f"Порог: {THRESHOLD_HOURS} часов")
     logger.info("=" * 50)
 
-    total_pages = get_page_count()
-    logger.info(f"Всего страниц: {total_pages}")
+    html = http_get(FORUM_URL)
+    if not html:
+        logger.error("Не удалось загрузить форум!")
+        with open("forum_page.html", "w", encoding="utf-8") as f:
+            f.write(html or "")
+        return
 
-    all_threads = []
-    for page in range(total_pages):
-        html = fetch_page(page)
-        if html:
-            threads = parse_threads(html)
-            all_threads.extend(threads)
-            logger.info(f"  Страница {page + 1}: {len(threads)} тем")
+    threads = fetch_page(html)
+    logger.info(f"Найдено тем: {len(threads)}")
 
-    if not all_threads:
-        logger.warning("Темы не найдены!")
-        # Сохраняем HTML для отладки
-        html = fetch_page()
-        if html:
-            with open("forum_page.html", "w", encoding="utf-8") as f:
-                f.write(html)
-            logger.info("Сохранён forum_page.html — изучи и пришли селекторы для правки.")
+    if not threads:
+        logger.warning("Темы не найдены! Сохраняю HTML для отладки.")
+        with open("forum_page.html", "w", encoding="utf-8") as f:
+            f.write(html)
         return
 
     now = datetime.now()
     threshold = now - timedelta(hours=THRESHOLD_HOURS)
 
-    old_threads = [t for t in all_threads if t["date"] and t["date"] < threshold]
+    old_threads = [t for t in threads if t["date"] and t["date"] < threshold]
 
     if old_threads:
         msg = f"⚠️ <b>Жалоба висит более {THRESHOLD_HOURS} ч!</b>\n\n"
