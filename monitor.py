@@ -8,105 +8,109 @@ from html.parser import HTMLParser
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-    print("ERROR: Не заданы TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID", flush=True)
-    sys.exit(1)
-
-print(f"OK: TOKEN={TELEGRAM_BOT_TOKEN[:10]}... CHAT_ID={TELEGRAM_CHAT_ID}", flush=True)
-
-FORUM_URL = "https://forum.radmir.games/forums/zhaloby-na-igrokov-sost-v-kriminal-nykh-strukturakh.972/"
-THRESHOLD_HOURS = 0
-ctx = ssl.create_default_context()
-
+LOG = []
 
 def log(msg):
+    LOG.append(str(msg))
     print(msg, flush=True)
 
+def save_log():
+    with open("log.txt", "w", encoding="utf-8") as f:
+        f.write("\n".join(LOG))
 
-def http_get(url):
-    try:
-        log(f"HTTP GET: {url}")
-        import urllib.request
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
-            data = resp.read().decode("utf-8", errors="replace")
-            log(f"HTTP OK: {len(data)} байт")
-            return data
-    except Exception as e:
-        log(f"HTTP ERROR: {e}")
-        return None
+try:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        log("ERROR: Не заданы TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID")
+        save_log()
+        sys.exit(1)
 
+    log("OK: Script started")
+    log(f"TOKEN={TELEGRAM_BOT_TOKEN[:10]}... CHAT_ID={TELEGRAM_CHAT_ID}")
 
-def send_telegram_message(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    try:
-        import urllib.request
-        data = json.dumps({"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}).encode()
-        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            log(f"TG OK: {resp.read().decode()}")
-            return True
-    except Exception as e:
-        log(f"TG ERROR: {e}")
-        return False
+    FORUM_URL = "https://forum.radmir.games/forums/zhaloby-na-igrokov-sost-v-kriminal-nykh-strukturakh.972/"
+    THRESHOLD_HOURS = 0
+    ctx = ssl.create_default_context()
 
+    def http_get(url):
+        try:
+            log(f"HTTP GET: {url}")
+            import urllib.request
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+                data = resp.read().decode("utf-8", errors="replace")
+                log(f"HTTP OK: {len(data)} байт")
+                return data
+        except Exception as e:
+            log(f"HTTP ERROR: {e}")
+            return None
 
-class ThreadParser(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.threads = []
-        self.in_title = False
-        self.title_text = ""
-        self.href = ""
-        self.data_time = ""
+    def send_telegram_message(message):
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        try:
+            import urllib.request
+            data = json.dumps({"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}).encode()
+            req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                log(f"TG OK: {resp.read().decode()}")
+                return True
+        except Exception as e:
+            log(f"TG ERROR: {e}")
+            return False
 
-    def handle_starttag(self, tag, attrs):
-        attrs_d = dict(attrs)
-        cls = attrs_d.get("class", "")
-        href = attrs_d.get("href", "")
-
-        if tag == "a" and "/threads/" in href and ("link" in cls or "js-" in href):
-            self.in_title = True
-            self.title_text = ""
-            self.href = href
-            self.data_time = ""
-
-        if tag == "time" and "data-time" in attrs_d:
-            self.data_time = attrs_d.get("data-time", "")
-
-    def handle_data(self, data):
-        if self.in_title:
-            self.title_text += data
-
-    def handle_endtag(self, tag):
-        if self.in_title and tag == "a" and "/threads/" in self.href:
-            title = self.title_text.strip()
-            if title:
-                url = self.href
-                if not url.startswith("http"):
-                    url = "https://forum.radmir.games" + url
-
-                date_str = None
-                if self.data_time:
-                    try:
-                        date_str = datetime.fromtimestamp(int(self.data_time))
-                    except (ValueError, OSError) as e:
-                        log(f"Date parse error: {self.data_time} -> {e}")
-
-                self.threads.append({
-                    "title": title,
-                    "url": url,
-                    "date": date_str,
-                })
-                log(f"  Thread: '{title}' date={date_str}")
-
+    class ThreadParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.threads = []
             self.in_title = False
             self.title_text = ""
             self.href = ""
             self.data_time = ""
 
+        def handle_starttag(self, tag, attrs):
+            attrs_d = dict(attrs)
+            cls = attrs_d.get("class", "")
+            href = attrs_d.get("href", "")
 
-def main():
+            if tag == "a" and "/threads/" in href and ("link" in cls or "js-" in href):
+                self.in_title = True
+                self.title_text = ""
+                self.href = href
+                self.data_time = ""
+
+            if tag == "time" and "data-time" in attrs_d:
+                self.data_time = attrs_d.get("data-time", "")
+
+        def handle_data(self, data):
+            if self.in_title:
+                self.title_text += data
+
+        def handle_endtag(self, tag):
+            if self.in_title and tag == "a" and "/threads/" in self.href:
+                title = self.title_text.strip()
+                if title:
+                    url = self.href
+                    if not url.startswith("http"):
+                        url = "https://forum.radmir.games" + url
+
+                    date_str = None
+                    if self.data_time:
+                        try:
+                            date_str = datetime.fromtimestamp(int(self.data_time))
+                        except (ValueError, OSError) as e:
+                            log(f"Date parse error: {self.data_time} -> {e}")
+
+                    self.threads.append({
+                        "title": title,
+                        "url": url,
+                        "date": date_str,
+                    })
+                    log(f"  Thread: '{title}' date={date_str}")
+
+                self.in_title = False
+                self.title_text = ""
+                self.href = ""
+                self.data_time = ""
+
     log("=" * 40)
     log("МОНИТОРИНГ")
     log("=" * 40)
@@ -116,8 +120,8 @@ def main():
         log("ERROR: Не удалось загрузить форум")
         with open("forum_page.html", "w", encoding="utf-8") as f:
             f.write(html or "<empty>")
-        log("Сохранён forum_page.html")
-        return
+        save_log()
+        sys.exit(1)
 
     parser = ThreadParser()
     parser.feed(html)
@@ -129,7 +133,8 @@ def main():
         with open("forum_page.html", "w", encoding="utf-8") as f:
             f.write(html)
         log("Сохранён forum_page.html")
-        return
+        save_log()
+        sys.exit(0)
 
     now = datetime.now()
     threshold = now - timedelta(hours=THRESHOLD_HOURS)
@@ -151,6 +156,9 @@ def main():
     else:
         log("Жалоб старше не найдено. Всё ок.")
 
+except Exception as e:
+    import traceback
+    log(f"FATAL: {e}")
+    log(traceback.format_exc())
 
-if __name__ == "__main__":
-    main()
+save_log()
