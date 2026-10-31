@@ -13,7 +13,8 @@ if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
     print("ERROR: Не заданы TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID")
     sys.exit(1)
 
-print(f"OK: TOKEN={TELEGRAM_BOT_TOKEN[:10]}... CHAT_ID={TELEGRAM_CHAT_ID}")
+token_short = TELEGRAM_BOT_TOKEN[:10] + "..."
+print(f"OK: TOKEN={token_short} CHAT_ID={TELEGRAM_CHAT_ID}")
 
 logging.basicConfig(
     level=logging.INFO,
