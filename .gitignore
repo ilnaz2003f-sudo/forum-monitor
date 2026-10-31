@@ -1,0 +1,4 @@
+*.log
+forum_page.html
+__pycache__/
+*.pyc
