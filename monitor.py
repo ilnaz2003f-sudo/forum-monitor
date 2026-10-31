@@ -21,7 +21,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 FORUM_URL = "https://forum.radmir.games/forums/zhaloby-na-igrokov-sost-v-kriminal-nykh-strukturakh.972/"
-THRESHOLD_HOURS = 20
+THRESHOLD_HOURS = 0  # ТЕСТ: 0 = любое время
+# Или 1/24 = 1 минута
 
 # SSL context — GitHub Actions
 ctx = ssl.create_default_context()
